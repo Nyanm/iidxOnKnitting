@@ -3,4 +3,19 @@ name = "iidxOnKnitting"
 version = "0.1.0"
 edition = "2024"
 
+# Library surface (embeddable into iidxOnEar) plus a thin CLI binary over it.
+[lib]
+name = "iidx_on_knitting"
+path = "src/lib.rs"
+
+[[bin]]
+name = "iidxOnKnitting"
+path = "src/main.rs"
+
 [dependencies]
+anyhow = "1.0"
+clap = { version = "4.6.1", features = ["derive"] }
+# vendored static libav (no system ffmpeg); FFMPEG_DIR is set in .cargo/config.toml.
+# default features (avdevice/avfilter/swscale/postproc) are off since vendor/ only has
+# avcodec/avformat/avutil/swresample.
+ffmpeg-the-third = { version = "4.1.0", default-features = false, features = ["codec", "format", "software-resampling", "static"] }
