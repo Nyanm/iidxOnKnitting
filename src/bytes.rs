@@ -21,3 +21,16 @@ pub fn read_u32_le(bytes: &[u8], offset: usize) -> Result<u32> {
         bytes[offset + 3],
     ]))
 }
+
+/// Read a big-endian u32 at `offset`, bounds-checked. The IFS header and its KBin manifest
+/// store every multi-byte integer big-endian (unlike s3p/chart, which are little-endian).
+pub fn read_u32_be(bytes: &[u8], offset: usize) -> Result<u32> {
+    let end = offset.checked_add(4).context("u32 offset overflow")?;
+    ensure!(end <= bytes.len(), "u32(be) read at {offset} out of bounds (len {})", bytes.len());
+    Ok(u32::from_be_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes[offset + 2],
+        bytes[offset + 3],
+    ]))
+}

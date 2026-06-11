@@ -8,6 +8,7 @@
 mod bytes;
 mod chart;
 mod codec;
+mod ifs;
 mod mix;
 mod render;
 mod s3p;

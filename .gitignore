@@ -3,5 +3,6 @@
 /.ai
 /.claude
 /.document
+/.script
 /target
 *.ogg

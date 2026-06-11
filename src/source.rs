@@ -6,16 +6,16 @@
 //!   - v25-29 : an `.ifs` archive wrapping an S3P0 keysound archive + the `.1` chart.
 //!   - v1-24  : an `.ifs` archive wrapping a 2DX9 keysound archive + the `.1` chart.
 //! We route on the input path alone: a directory is the v30+ loose layout; a regular file is
-//! an `.ifs`. The `.ifs` paths (v1-29) are stubbed here and land in Step 7 (carve) / Step 8 (2dx).
+//! an `.ifs`, whose members we read via the minimal KBin manifest reader (`ifs`). The s3p case
+//! (v25-29 and any s3p-packed song) is handled; 2dx-packed songs (v1-24 + 2dx songs) are Step 8.
 
+use crate::ifs;
 use crate::s3p;
 
 use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
-
-const IFS_MAGIC: [u8; 4] = [0x6C, 0xAD, 0x8F, 0x89]; // .ifs container magic (first 4 bytes)
 
 /// Everything the renderer needs, decoupled from on-disk packaging.
 pub struct SongSource {
@@ -63,13 +63,29 @@ fn resolve_loose_folder(dir: &Path) -> Result<SongSource> {
     Ok(SongSource { vec_keysound, bytes_chart })
 }
 
-// v1-29 .ifs: confirm the container magic, then defer to Step 7 for the actual carve.
+// v1-29 .ifs: read the KBin manifest, take the `.1` chart and the `.s3p` keysound archive.
 fn resolve_ifs(file: &Path) -> Result<SongSource> {
     let bytes_ifs = fs::read(file).with_context(|| format!("reading {}", file.display()))?;
-    ensure!(
-        bytes_ifs.len() >= 4 && bytes_ifs[0..4] == IFS_MAGIC,
-        "input {} is neither a loose song folder nor an .ifs archive",
-        file.display()
-    );
-    bail!(".ifs (v1-29) support is not implemented yet — coming in Step 7: {}", file.display());
+    let members = ifs::list_members(&bytes_ifs)
+        .with_context(|| format!("{} is neither a loose folder nor a readable .ifs", file.display()))?;
+
+    let member_chart = members
+        .iter()
+        .find(|member| member.name.ends_with(".1"))
+        .with_context(|| format!("no .1 chart inside {}", file.display()))?;
+    let bytes_chart =
+        bytes_ifs[member_chart.offset..member_chart.offset + member_chart.size].to_vec();
+
+    match members.iter().find(|member| member.name.ends_with(".s3p")) {
+        Some(member_s3p) => {
+            let bytes_archive = &bytes_ifs[member_s3p.offset..member_s3p.offset + member_s3p.size];
+            let vec_keysound = s3p::unpack(bytes_archive)
+                .with_context(|| format!("unpacking {} from {}", member_s3p.name, file.display()))?;
+            Ok(SongSource { vec_keysound, bytes_chart })
+        }
+        None => bail!(
+            "{} is a 2dx-packed song (no .s3p) — v1-24 / 2dx rendering is Step 8",
+            file.display()
+        ),
+    }
 }
