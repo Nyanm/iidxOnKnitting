@@ -1,26 +1,23 @@
-//! libav FFI: decode WMAv2 keysound blobs to 44.1k stereo f32 PCM (Step 4), and encode a
-//! mixed 44.1k timeline to Ogg/Opus (Step 6).
+//! libav FFI: decode keysound blobs to 44.1k stereo f32 PCM (Step 4), and encode a mixed 44.1k
+//! timeline to Ogg/Opus (Step 6).
 //!
-//! libav demuxes from a path, so each blob is written to a short-lived temp file. A RAII
-//! guard (`TempFile`) removes that file on every exit path — normal return, `?` error, or
-//! panic unwind. The decode loop mirrors the reused SDVX transcode pipeline, but resamples
-//! to f32/stereo/44100 (the keysound native rate) so the mixer can sum without per-sample
-//! rate conversion.
+//! Each blob is demuxed straight from memory via a custom AVIO context (a read+seek callback
+//! over the byte slice) — no temp file, no disk I/O (Step 9; on Windows the old temp-file churn
+//! dominated runtime, ~6ms/keysound). The decode loop resamples to f32/stereo/44100 (the
+//! keysound native rate) so the mixer can sum without per-sample rate conversion.
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::ffi::{c_int, c_void};
+use std::path::Path;
 use std::ptr;
 use std::slice;
 use std::sync::Once;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, ensure};
 use ffmpeg_the_third as ffmpeg;
 
 const KEYSOUND_RATE: u32 = 44_100; // all IIDX s3p keysounds are 44.1k stereo (see S3P_FORMAT.md)
 
 static INIT: Once = Once::new();
-static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 // ffmpeg init is idempotent but not free; run it exactly once across all threads.
 fn ensure_init() {
@@ -31,13 +28,109 @@ fn ensure_init() {
     });
 }
 
+const AVIO_BUFFER: usize = 4096;          // libav read-chunk size for our in-memory AVIO
+const AVERROR_EOF: c_int = -541_478_725;  // FFERRTAG('E','O','F',' '): end of the blob
+
+// in-memory read cursor handed to the AVIO callbacks via the opaque pointer
+struct BlobReader {
+    data: *const u8,
+    len: usize,
+    pos: usize,
+}
+
+// AVIO read callback: copy up to buf_size bytes from the blob, advance, return count (or EOF).
+unsafe extern "C" fn blob_read(opaque: *mut c_void, buf: *mut u8, buf_size: c_int) -> c_int {
+    let reader = unsafe { &mut *(opaque as *mut BlobReader) };
+    let remaining = reader.len - reader.pos;
+    if remaining == 0 {
+        return AVERROR_EOF;
+    }
+    let count = remaining.min(buf_size.max(0) as usize);
+    unsafe { ptr::copy_nonoverlapping(reader.data.add(reader.pos), buf, count) };
+    reader.pos += count;
+    count as c_int
+}
+
+// AVIO seek callback: move the cursor; AVSEEK_SIZE asks for the total length. Returns new pos / -1.
+unsafe extern "C" fn blob_seek(opaque: *mut c_void, offset: i64, whence: c_int) -> i64 {
+    let reader = unsafe { &mut *(opaque as *mut BlobReader) };
+    let whence = whence & !ffmpeg::ffi::AVSEEK_FORCE;
+    if whence == ffmpeg::ffi::AVSEEK_SIZE {
+        return reader.len as i64;
+    }
+    let new_pos = match whence {
+        0 => offset,                       // SEEK_SET
+        1 => reader.pos as i64 + offset,   // SEEK_CUR
+        2 => reader.len as i64 + offset,   // SEEK_END
+        _ => return -1,
+    };
+    if new_pos < 0 || new_pos > reader.len as i64 {
+        return -1;
+    }
+    reader.pos = new_pos as usize;
+    new_pos
+}
+
+// Frees the AVIO context + its (possibly realloc'd) buffer. Held alongside the Input so teardown
+// order is deterministic: the Input (close_input) drops first, then this, then the cursor.
+struct AvioGuard {
+    avio: *mut ffmpeg::ffi::AVIOContext,
+}
+
+impl Drop for AvioGuard {
+    fn drop(&mut self) {
+        unsafe {
+            ffmpeg::ffi::av_freep((&mut (*self.avio).buffer) as *mut *mut u8 as *mut c_void);
+            ffmpeg::ffi::avio_context_free(&mut self.avio);
+        }
+    }
+}
+
 /// Decode one keysound blob (WMAv2 from s3p, or WAV/MS-ADPCM from 2dx) to interleaved stereo
-/// f32 PCM at 44.1 kHz. The codec is auto-detected from the blob's contents.
+/// f32 PCM at 44.1 kHz. The codec is auto-detected; the blob is demuxed in-memory (no temp file).
 pub fn decode_keysound(blob: &[u8]) -> Result<Vec<f32>> {
     ensure_init();
-    let temp = TempFile::create(blob)?; // removed on drop (success / error / panic)
-    decode_file_to_pcm(&temp.path)
-    // `temp` drops here; the demuxer opened inside decode_file_to_pcm is already closed
+
+    // cursor + AVIO must outlive the Input; declared first so they drop last (after close_input)
+    let mut cursor = BlobReader { data: blob.as_ptr(), len: blob.len(), pos: 0 };
+    let opaque = (&mut cursor as *mut BlobReader).cast::<c_void>();
+
+    let guard = unsafe {
+        let buffer = ffmpeg::ffi::av_malloc(AVIO_BUFFER) as *mut u8;
+        ensure!(!buffer.is_null(), "av_malloc for AVIO buffer failed");
+        let avio = ffmpeg::ffi::avio_alloc_context(
+            buffer,
+            AVIO_BUFFER as c_int,
+            0, // read-only
+            opaque,
+            Some(blob_read),
+            None, // no write callback
+            Some(blob_seek),
+        );
+        if avio.is_null() {
+            ffmpeg::ffi::av_free(buffer as *mut c_void); // avio didn't take ownership on failure
+            anyhow::bail!("avio_alloc_context failed");
+        }
+        AvioGuard { avio }
+    };
+
+    let input = unsafe {
+        let mut format_ctx = ffmpeg::ffi::avformat_alloc_context();
+        ensure!(!format_ctx.is_null(), "avformat_alloc_context failed");
+        (*format_ctx).pb = guard.avio;
+        (*format_ctx).flags |= ffmpeg::ffi::AVFMT_FLAG_CUSTOM_IO; // keep close_input off our pb
+        let ret = ffmpeg::ffi::avformat_open_input(
+            &mut format_ctx,
+            ptr::null(),     // url (unused: we read via the custom AVIO)
+            ptr::null(),     // fmt: let libav probe the container
+            ptr::null_mut(), // options
+        );
+        ensure!(ret >= 0, "avformat_open_input (in-memory) failed: {ret}");
+        ffmpeg::format::context::Input::wrap(format_ctx)
+    };
+
+    decode_input(input)
+    // drop order: input (close_input) -> guard (free AVIO) -> cursor
 }
 
 // Map a source channel count to a canonical, mask-bearing layout for the resampler. We derive
@@ -51,14 +144,12 @@ fn source_layout(channels: u32) -> ffmpeg::ChannelLayout<'static> {
     }
 }
 
-// Decode an audio file (any vendored-supported codec) to interleaved stereo f32 @ 44.1 kHz.
-fn decode_file_to_pcm(path: &Path) -> Result<Vec<f32>> {
-    let mut ictx =
-        ffmpeg::format::input(path).with_context(|| format!("opening {}", path.display()))?;
+// Decode an opened audio Input (any vendored-supported codec) to interleaved stereo f32 @ 44.1k.
+fn decode_input(mut ictx: ffmpeg::format::context::Input) -> Result<Vec<f32>> {
     let input_stream = ictx
         .streams()
         .best(ffmpeg::media::Type::Audio)
-        .ok_or_else(|| anyhow!("no audio stream in {}", path.display()))?;
+        .ok_or_else(|| anyhow!("no audio stream in keysound blob"))?;
     let stream_index = input_stream.index();
 
     let context = ffmpeg::codec::context::Context::from_parameters(input_stream.parameters())
@@ -121,30 +212,6 @@ fn drain_decoded(
 fn read_stereo_packed(frame: &ffmpeg::frame::Audio) -> &[f32] {
     let stereo: &[(f32, f32)] = frame.plane::<(f32, f32)>(0);
     unsafe { slice::from_raw_parts(stereo.as_ptr() as *const f32, stereo.len() * 2) }
-}
-
-// ── temp file with RAII cleanup ────────────────────────────────────────────────
-// Unique name = temp_dir + process id + atomic counter, so concurrent/sequential decodes
-// never collide. Drop removes the file; a hard process kill is the only leak path, and the
-// OS reclaims its temp dir.
-struct TempFile {
-    path: PathBuf,
-}
-
-impl TempFile {
-    fn create(bytes: &[u8]) -> Result<Self> {
-        let serial = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let mut path = std::env::temp_dir();
-        path.push(format!("iidx_keysound_{}_{}.wma", std::process::id(), serial));
-        fs::write(&path, bytes).with_context(|| format!("writing temp {}", path.display()))?;
-        Ok(Self { path })
-    }
-}
-
-impl Drop for TempFile {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path); // best-effort; nothing useful to do on failure
-    }
 }
 
 // ── Opus encode (Step 6) ───────────────────────────────────────────────────────
