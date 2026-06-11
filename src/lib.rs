@@ -5,6 +5,7 @@
 //! public API. All business logic lives in the submodules. The crate is built to be
 //! embedded into iidxOnEar as a library; `render_song` is the single entry point.
 
+mod bytes;
 mod chart;
 mod codec;
 mod mix;
