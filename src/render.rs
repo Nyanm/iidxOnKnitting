@@ -34,7 +34,7 @@ pub fn render_song(input_path: &Path, difficulty: Difficulty, output_path: &Path
         let index_sample = sample as usize - 1;
         if vec_pcm_cache[index_sample].is_none() {
             vec_pcm_cache[index_sample] =
-                Some(codec::decode_wma_to_pcm(&vec_keysound[index_sample])?);
+                Some(codec::decode_keysound(&vec_keysound[index_sample])?);
         }
     }
 

@@ -31,12 +31,24 @@ fn ensure_init() {
     });
 }
 
-/// Decode one ASF/WMAv2 keysound blob to interleaved stereo f32 PCM at 44.1 kHz.
-pub fn decode_wma_to_pcm(blob: &[u8]) -> Result<Vec<f32>> {
+/// Decode one keysound blob (WMAv2 from s3p, or WAV/MS-ADPCM from 2dx) to interleaved stereo
+/// f32 PCM at 44.1 kHz. The codec is auto-detected from the blob's contents.
+pub fn decode_keysound(blob: &[u8]) -> Result<Vec<f32>> {
     ensure_init();
     let temp = TempFile::create(blob)?; // removed on drop (success / error / panic)
     decode_file_to_pcm(&temp.path)
     // `temp` drops here; the demuxer opened inside decode_file_to_pcm is already closed
+}
+
+// Map a source channel count to a canonical, mask-bearing layout for the resampler. We derive
+// this from the count rather than trust the decoder: WMAv2 reports an unspecified-mask 2-channel
+// layout, which makes ffmpeg-the-third's get2()/swr panic on `.mask().unwrap()`. Keysounds are
+// only ever mono (some 2dx) or stereo (s3p WMA + many 2dx); anything else falls back to stereo.
+fn source_layout(channels: u32) -> ffmpeg::ChannelLayout<'static> {
+    match channels {
+        1 => ffmpeg::ChannelLayout::MONO,
+        _ => ffmpeg::ChannelLayout::STEREO,
+    }
 }
 
 // Decode an audio file (any vendored-supported codec) to interleaved stereo f32 @ 44.1 kHz.
@@ -53,12 +65,13 @@ fn decode_file_to_pcm(path: &Path) -> Result<Vec<f32>> {
         .context("decoder context from stream parameters")?;
     let mut decoder = context.decoder().audio().context("opening audio decoder")?;
 
-    // The WMAv2 decoder reports an unspecified-mask 2-channel layout, which makes
-    // ffmpeg-the-third's get2() panic on `.mask().unwrap()`. Every keysound is stereo
-    // (see S3P_FORMAT.md), so declare the source layout as canonical STEREO.
+    // source layout derived from channel count (mono keysounds exist in 2dx); target is stereo.
+    // ffmpeg 8.0 dropped the old `channels()`; read the count off the new ch_layout (nb_channels
+    // is valid even when the layout carries no mask, as WMAv2 reports).
+    let channels_source = decoder.ch_layout().channels();
     let mut resampler = ffmpeg::software::resampling::Context::get2(
         decoder.format(),
-        ffmpeg::ChannelLayout::STEREO,
+        source_layout(channels_source),
         decoder.rate(),
         ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed),
         ffmpeg::ChannelLayout::STEREO,
@@ -73,10 +86,10 @@ fn decode_file_to_pcm(path: &Path) -> Result<Vec<f32>> {
             continue;
         }
         decoder.send_packet(&packet).context("sending packet to decoder")?;
-        drain_decoded(&mut decoder, &mut resampler, &mut pcm)?;
+        drain_decoded(&mut decoder, &mut resampler, &mut pcm, channels_source)?;
     }
     decoder.send_eof().context("flushing decoder")?;
-    drain_decoded(&mut decoder, &mut resampler, &mut pcm)?;
+    drain_decoded(&mut decoder, &mut resampler, &mut pcm, channels_source)?;
 
     Ok(pcm)
 }
@@ -86,13 +99,14 @@ fn drain_decoded(
     decoder: &mut ffmpeg::decoder::Audio,
     resampler: &mut ffmpeg::software::resampling::Context,
     pcm: &mut Vec<f32>,
+    channels_source: u32,
 ) -> Result<()> {
     let mut decoded = unsafe { ffmpeg::Frame::empty() };
     while decoder.receive_frame(&mut decoded).is_ok() {
         let mut decoded_audio = ffmpeg::frame::Audio::from(decoded);
-        // Stamp the canonical STEREO layout the resampler was configured with (the decoder's
-        // own layout carries no mask), so swr_convert_frame accepts the input frame.
-        decoded_audio.set_ch_layout(ffmpeg::ChannelLayout::STEREO);
+        // Stamp the same source layout the resampler was configured with (the decoder's own
+        // layout may carry no mask), so swr_convert_frame accepts the input frame.
+        decoded_audio.set_ch_layout(source_layout(channels_source));
         let mut resampled = ffmpeg::frame::Audio::empty();
         resampler.run(&decoded_audio, &mut resampled).context("resampling frame")?;
         pcm.extend_from_slice(read_stereo_packed(&resampled));

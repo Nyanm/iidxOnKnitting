@@ -9,6 +9,7 @@
 //! an `.ifs`, whose members we read via the minimal KBin manifest reader (`ifs`). The s3p case
 //! (v25-29 and any s3p-packed song) is handled; 2dx-packed songs (v1-24 + 2dx songs) are Step 8.
 
+use crate::dx2;
 use crate::ifs;
 use crate::s3p;
 
@@ -76,16 +77,31 @@ fn resolve_ifs(file: &Path) -> Result<SongSource> {
     let bytes_chart =
         bytes_ifs[member_chart.offset..member_chart.offset + member_chart.size].to_vec();
 
-    match members.iter().find(|member| member.name.ends_with(".s3p")) {
-        Some(member_s3p) => {
-            let bytes_archive = &bytes_ifs[member_s3p.offset..member_s3p.offset + member_s3p.size];
-            let vec_keysound = s3p::unpack(bytes_archive)
-                .with_context(|| format!("unpacking {} from {}", member_s3p.name, file.display()))?;
+    // keysound archive: prefer `.s3p` (v25-29 + s3p songs); else the single `.2dx` (v1-24 + 2dx songs)
+    if let Some(member_s3p) = members.iter().find(|member| member.name.ends_with(".s3p")) {
+        let bytes_archive = &bytes_ifs[member_s3p.offset..member_s3p.offset + member_s3p.size];
+        let vec_keysound = s3p::unpack(bytes_archive)
+            .with_context(|| format!("unpacking {} from {}", member_s3p.name, file.display()))?;
+        return Ok(SongSource { vec_keysound, bytes_chart });
+    }
+
+    let members_2dx: Vec<&ifs::Member> = members
+        .iter()
+        .filter(|member| member.name.ends_with(".2dx") && !member.name.ends_with("_pre.2dx"))
+        .collect();
+    match members_2dx.as_slice() {
+        [member_2dx] => {
+            let bytes_archive = &bytes_ifs[member_2dx.offset..member_2dx.offset + member_2dx.size];
+            let vec_keysound = dx2::unpack(bytes_archive)
+                .with_context(|| format!("unpacking {} from {}", member_2dx.name, file.display()))?;
             Ok(SongSource { vec_keysound, bytes_chart })
         }
-        None => bail!(
-            "{} is a 2dx-packed song (no .s3p) — v1-24 / 2dx rendering is Step 8",
-            file.display()
+        [] => bail!("no .s3p or .2dx keysound archive inside {}", file.display()),
+        many => bail!(
+            "{} has {} keysound .2dx archives (multi-source) — not yet supported: {:?}",
+            file.display(),
+            many.len(),
+            many.iter().map(|member| &member.name).collect::<Vec<_>>()
         ),
     }
 }
