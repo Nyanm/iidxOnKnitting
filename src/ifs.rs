@@ -15,6 +15,7 @@ use crate::bytes::read_u32_be;
 use anyhow::{Context, Result, bail, ensure};
 
 const IFS_MAGIC: [u8; 4] = [0x6C, 0xAD, 0x8F, 0x89]; // IFS signature (big-endian 0x6CAD8F89)
+const IFS_ENCRYPTED_MAGIC: [u8; 4] = [0x72, 0x9B, 0x79, 0xB1]; // 256-byte encrypted/locked stubs (18 seen)
 const IFS_HEADER_LEN: usize = 36;                    // sig+ver+~ver+time+treeSize+manifestEnd+md5
 const MANIFEST_END_OFFSET: usize = 0x10;             // u32(be): where the manifest ends / data begins
 const MANIFEST_BASE: usize = 0x24;                   // manifest (KBin) starts right after the 36B header
@@ -43,9 +44,18 @@ pub struct Member {
 
 /// Parse the IFS header + KBin manifest, returning every packed file with absolute offsets.
 pub fn list_members(bytes_ifs: &[u8]) -> Result<Vec<Member>> {
+    ensure!(bytes_ifs.len() >= 4, "file too small to be an IFS archive ({} bytes)", bytes_ifs.len());
+    if bytes_ifs[0..4] == IFS_ENCRYPTED_MAGIC {
+        bail!(
+            "encrypted/locked IFS (magic {:02X?}) — not supported (DRM/online-unlock stub)",
+            &bytes_ifs[0..4]
+        );
+    }
     ensure!(
         bytes_ifs.len() >= IFS_HEADER_LEN && bytes_ifs[0..4] == IFS_MAGIC,
-        "not an IFS archive"
+        "not an IFS archive (magic {:02X?}, expected {:02X?})",
+        &bytes_ifs[0..4],
+        IFS_MAGIC
     );
     let manifest_end = read_u32_be(bytes_ifs, MANIFEST_END_OFFSET)? as usize;
     ensure!(
