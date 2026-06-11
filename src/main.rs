@@ -1,7 +1,6 @@
 //! CLI entry point. Thin wrapper over the library's `render_song`.
 
 use std::path::PathBuf;
-use std::str::FromStr;
 
 use anyhow::Result;
 use clap::Parser;
@@ -22,15 +21,9 @@ struct CliArgs {
     #[arg(short, long)]
     out: PathBuf,
 
-    /// Difficulty to render: SPB/SPN/SPH/SPA/SPL/DPB/DPN/DPH/DPA/DPL
-    #[arg(short, long, default_value = "SPN", value_parser = parse_difficulty)]
+    /// Difficulty to render (spb/spn/sph/spa/spl/dpb/dpn/dph/dpa/dpl)
+    #[arg(short, long, default_value = "spn")]
     difficulty: Difficulty,
-}
-
-// clap value parser: a free fn returning Result<T, E: Display> is the explicit, unambiguous
-// way to parse a custom type, instead of relying on clap's FromStr auto-detection.
-fn parse_difficulty(str_value: &str) -> Result<Difficulty, String> {
-    Difficulty::from_str(str_value)
 }
 
 fn main() -> Result<()> {

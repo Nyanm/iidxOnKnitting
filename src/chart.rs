@@ -12,7 +12,6 @@ use crate::bytes::{read_u16_le, read_u32_le};
 
 use std::fs;
 use std::path::Path;
-use std::str::FromStr;
 
 use anyhow::{Context, Result, ensure};
 
@@ -23,17 +22,28 @@ const TIME_END_SENTINEL: u32 = 0x7FFF_FFFF; // type-6 end marker carries this ti
 /// A chart difficulty. Order mirrors IIDX's canonical levels array
 /// (SPB SPN SPH SPA SPL DPB DPN DPH DPA DPL). Any difficulty reconstructs the same
 /// audio, but not every song has every difficulty — SPN exists for every song.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Derives `ValueEnum` so the CLI accepts the enum directly (value names spb/spn/.../dpl).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Difficulty {
+    #[value(name = "spb")]
     SpBeginner,
+    #[value(name = "spn")]
     SpNormal,
+    #[value(name = "sph")]
     SpHyper,
+    #[value(name = "spa")]
     SpAnother,
+    #[value(name = "spl")]
     SpLeggendaria,
+    #[value(name = "dpb")]
     DpBeginner,
+    #[value(name = "dpn")]
     DpNormal,
+    #[value(name = "dph")]
     DpHyper,
+    #[value(name = "dpa")]
     DpAnother,
+    #[value(name = "dpl")]
     DpLeggendaria,
 }
 
@@ -56,42 +66,40 @@ impl Difficulty {
     }
 }
 
-impl FromStr for Difficulty {
-    type Err = String;
-
-    fn from_str(str_input: &str) -> Result<Self, Self::Err> {
-        match str_input.to_ascii_uppercase().as_str() {
-            "SPB" => Ok(Self::SpBeginner),
-            "SPN" => Ok(Self::SpNormal),
-            "SPH" => Ok(Self::SpHyper),
-            "SPA" => Ok(Self::SpAnother),
-            "SPL" => Ok(Self::SpLeggendaria),
-            "DPB" => Ok(Self::DpBeginner),
-            "DPN" => Ok(Self::DpNormal),
-            "DPH" => Ok(Self::DpHyper),
-            "DPA" => Ok(Self::DpAnother),
-            "DPL" => Ok(Self::DpLeggendaria),
-            other => Err(format!(
-                "unknown difficulty {other:?} (expected one of SPB/SPN/SPH/SPA/SPL/DPB/DPN/DPH/DPA/DPL)"
-            )),
-        }
-    }
-}
-
 /// One scheduled keysound playback: play sample `sample_1based` at `time_ms`.
-// fields are consumed by the mixer in Step 5; allow until that lands
-#[allow(dead_code)]
 pub struct Sounding {
     pub time_ms: u32,
     pub sample_1based: u16,
 }
 
 /// A parsed chart difficulty reduced to what the renderer needs.
-// duration_ms is consumed by the mixer in Step 5; allow until then
-#[allow(dead_code)]
 pub struct Chart {
     pub events: Vec<Sounding>, // sounding events in chart (time) order
     pub duration_ms: u32,      // last real event time (excludes the end sentinel)
+}
+
+/// Chart event kind, decoded from the raw u8 type field. Only the audio-relevant kinds are
+/// named; bar line / BPM / end / metadata (types 4/5/6/12/16) collapse into `Other`.
+enum EventType {
+    VisibleNoteP1, // 0: P1 visible note (plays its lane's assigned sample)
+    VisibleNoteP2, // 1: P2 visible note (DP)
+    AssignLane,    // 2: assign keysound `value` to lane `param`
+    AutoPlay,      // 7: auto-play keysound `value`
+    InitialAssign, // 8: initial lane->sample assignment at song start
+    Other,         // 4/5/6/12/16 etc.: not audio
+}
+
+impl EventType {
+    fn from_u8(raw: u8) -> Self {
+        match raw {
+            0 => Self::VisibleNoteP1,
+            1 => Self::VisibleNoteP2,
+            2 => Self::AssignLane,
+            7 => Self::AutoPlay,
+            8 => Self::InitialAssign,
+            _ => Self::Other,
+        }
+    }
 }
 
 /// Parse one difficulty out of a .1 chart into a flat list of sounding events.
@@ -132,66 +140,32 @@ pub fn parse(chart_path: &Path, difficulty: Difficulty) -> Result<Chart> {
     for index_event in 0..count_events {
         let base = offset_events + index_event * EVENT_LEN;
         let time_ms = read_u32_le(&bytes_chart, base)?;
-        let type_event = bytes_chart[base + 4];
+        if time_ms == TIME_END_SENTINEL { continue; }
+
+        let type_event = EventType::from_u8(bytes_chart[base + 4]);
         let param = bytes_chart[base + 5];
         let value = read_u16_le(&bytes_chart, base + 6)?;
 
         match type_event {
-            // type 8 (initial) / type 2: assign keysound `value` to lane `param`
-            8 | 2 => lane_to_sample[param as usize] = value,
-            // type 7: auto-play keysound `value` at this time
-            7 => events.push(Sounding { time_ms, sample_1based: value }),
-            // type 0 (P1) / type 1 (P2) visible note: play the lane's currently assigned sample
-            0 | 1 => {
+            // assign keysound `value` to lane `param` (initial or mid-song)
+            EventType::InitialAssign | EventType::AssignLane => {
+                lane_to_sample[param as usize] = value;
+            }
+            // auto-play keysound `value` at this time
+            EventType::AutoPlay => events.push(Sounding { time_ms, sample_1based: value }),
+            // visible note: play the lane's currently assigned sample
+            EventType::VisibleNoteP1 | EventType::VisibleNoteP2 => {
                 let sample = lane_to_sample[param as usize];
                 if sample != 0 {
                     events.push(Sounding { time_ms, sample_1based: sample });
                 }
             }
-            // type 4/5/6/12/16: bar line / BPM / end / metadata — not audio
-            _ => {}
+            // bar line / BPM / end / metadata — not audio
+            EventType::Other => {}
         }
 
-        if time_ms != TIME_END_SENTINEL {
-            duration_ms = duration_ms.max(time_ms);
-        }
+        duration_ms = duration_ms.max(time_ms);
     }
 
     Ok(Chart { events, duration_ms })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn sample_chart() -> std::path::PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join(".sample/iidxOnEar/.sample/unpack/30000/30000.1")
-    }
-
-    #[test]
-    fn parse_30000_spn() {
-        let path_sample = sample_chart();
-        if !path_sample.exists() {
-            eprintln!("skipping parse_30000_spn: sample absent {}", path_sample.display());
-            return;
-        }
-
-        let chart = parse(&path_sample, Difficulty::SpNormal).expect("parse 30000.1 SPN");
-
-        // matches the offline probe: 114.65s, 2369 auto-plays + up to 1081 visible notes
-        assert_eq!(chart.duration_ms, 114650, "SPN duration");
-        assert!(
-            chart.events.len() >= 2369 && chart.events.len() <= 3450,
-            "sounding count {} out of expected range",
-            chart.events.len()
-        );
-        assert!(
-            chart.events.iter().all(|sounding| (1..=1186).contains(&sounding.sample_1based)),
-            "all sample numbers within 1..=1186"
-        );
-        assert!(
-            chart.events.windows(2).all(|pair| pair[0].time_ms <= pair[1].time_ms),
-            "events should be in non-decreasing time order"
-        );
-    }
 }

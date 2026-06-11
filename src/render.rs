@@ -1,16 +1,16 @@
 //! Top-level render pipeline: archive unpack -> chart parse -> keysound decode ->
-//! timeline mix -> Opus encode. Filled in incrementally over Steps 2-6.
+//! timeline mix -> Opus encode. This is the crate's single public entry point.
 
 use crate::chart::{self, Difficulty};
 use crate::codec;
+use crate::mix;
 use crate::s3p;
 
 use std::path::Path;
 
 use anyhow::{Result, ensure};
 
-/// Render one IIDX song to an Ogg/Opus file. This is the crate's single public entry
-/// point and the shape that will be called from iidxOnEar.
+/// Render one IIDX song to an Ogg/Opus file. This is the shape called from iidxOnEar.
 ///
 /// - `s3p_path`    keysound archive (S3P0 container, WMAv2 payloads)
 /// - `chart_path`  chart file (.1)
@@ -22,12 +22,12 @@ pub fn render_song(
     difficulty: Difficulty,
     output_path: &Path,
 ) -> Result<()> {
-    // Step 2: unpack the keysound archive (index i -> 1-based sample i+1).
+    // unpack the keysound archive (index i -> 1-based sample i+1)
     let vec_keysound = s3p::unpack(s3p_path)?;
-    // Step 3: parse the chosen difficulty into a flat list of sounding events.
+    // parse the chosen difficulty into a flat list of sounding events
     let parsed_chart = chart::parse(chart_path, difficulty)?;
 
-    // Step 4: decode each referenced keysound once into a 44.1k stereo PCM cache.
+    // decode each referenced keysound once into a 44.1k stereo PCM cache
     let mut vec_pcm_cache: Vec<Option<Vec<f32>>> = vec![None; vec_keysound.len()];
     for sounding in &parsed_chart.events {
         let sample = sounding.sample_1based;
@@ -42,16 +42,17 @@ pub fn render_song(
                 Some(codec::decode_wma_to_pcm(&vec_keysound[index_sample])?);
         }
     }
-    let count_decoded = vec_pcm_cache.iter().filter(|pcm| pcm.is_some()).count();
 
-    // Remaining pipeline (Steps 5-6):
-    //   mix::render(events, cache, duration)  -> 44.1k stereo timeline   (Step 5)
-    //   codec::encode_opus(timeline, output)  -> Ogg/Opus                (Step 6)
-    let _ = output_path;
-    anyhow::bail!(
-        "render_song: decoded {} of {} keysounds for {} events; mix/encode land in Steps 5-6",
-        count_decoded,
-        vec_keysound.len(),
-        parsed_chart.events.len()
-    )
+    // mix every sounding onto a 44.1k stereo timeline (peak-normalized)
+    let timeline = mix::render(&parsed_chart.events, &vec_pcm_cache, parsed_chart.duration_ms);
+    let seconds = (timeline.len() / 2) as f64 / 44_100.0;
+    eprintln!(
+        "iidxOnKnitting: {} events, {:.1}s; encoding Opus -> {}",
+        parsed_chart.events.len(),
+        seconds,
+        output_path.display()
+    );
+
+    // resample to 48k and encode to Ogg/Opus
+    codec::encode_opus(&timeline, output_path)
 }

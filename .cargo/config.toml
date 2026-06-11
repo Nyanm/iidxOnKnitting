@@ -2,7 +2,9 @@
 # `relative = true` resolves it against this project root, so the repo stays portable.
 # Neither variable uses force=true, so an externally-set env var still wins.
 #
-# LIBCLANG_PATH is intentionally NOT set here (no machine paths in git); cargo_env.bat
-# prepends LLVM\bin to PATH so bindgen finds libclang.dll.
+# LIBCLANG_PATH is intentionally NOT set here (no machine paths in git). For a clean/first
+# build, put LLVM\bin on PATH so bindgen finds libclang.dll, e.g. in bash:
+#   export PATH="/c/Program Files/LLVM/bin:$PATH"
+# Incremental builds need nothing extra (bindings are cached, rustc finds link.exe itself).
 [env]
 FFMPEG_DIR = { value = "vendor", relative = true }
