@@ -11,6 +11,7 @@ mod codec;
 mod mix;
 mod render;
 mod s3p;
+mod source;
 
 pub use chart::Difficulty;
 pub use render::render_song;

@@ -7,28 +7,21 @@
 
 use crate::bytes::read_u32_le;
 
-use std::fs;
-use std::path::Path;
-
 use anyhow::{Context, Result, ensure};
 
 const S3P0_MAGIC: &[u8; 4] = b"S3P0"; // archive magic at file offset 0
 const S3V0_MAGIC: &[u8; 4] = b"S3V0"; // per-keysound block magic
 const S3V0_HEADER_LEN: usize = 0x20;  // S3V0 block header size; payload follows it
 
-/// Unpack an S3P0 archive into its keysound payloads (each = raw ASF/WMAv2 bytes).
+/// Unpack an S3P0 archive (raw bytes) into its keysound payloads (each = raw ASF/WMAv2 bytes).
 /// The returned Vec is 0-indexed; chart sample number N (1-based) maps to index N-1.
-pub fn unpack(s3p_path: &Path) -> Result<Vec<Vec<u8>>> {
-    let bytes_archive =
-        fs::read(s3p_path).with_context(|| format!("reading s3p {}", s3p_path.display()))?;
-
+pub fn unpack(bytes_archive: &[u8]) -> Result<Vec<Vec<u8>>> {
     ensure!(
         bytes_archive.len() >= 8 && &bytes_archive[0..4] == S3P0_MAGIC,
-        "not an S3P0 archive: {}",
-        s3p_path.display()
+        "not an S3P0 archive"
     );
 
-    let count_entries = read_u32_le(&bytes_archive, 4)? as usize;
+    let count_entries = read_u32_le(bytes_archive, 4)? as usize;
     let table_end = 8 + count_entries.checked_mul(8).context("entry table size overflow")?;
     ensure!(
         table_end <= bytes_archive.len(),
@@ -39,8 +32,8 @@ pub fn unpack(s3p_path: &Path) -> Result<Vec<Vec<u8>>> {
     let mut vec_keysound = Vec::with_capacity(count_entries);
     for index_entry in 0..count_entries {
         let offset_table = 8 + index_entry * 8;
-        let offset_block = read_u32_le(&bytes_archive, offset_table)? as usize;
-        let size_block = read_u32_le(&bytes_archive, offset_table + 4)? as usize;
+        let offset_block = read_u32_le(bytes_archive, offset_table)? as usize;
+        let size_block = read_u32_le(bytes_archive, offset_table + 4)? as usize;
         let end_block = offset_block
             .checked_add(size_block)
             .with_context(|| format!("entry {index_entry} range overflow"))?;

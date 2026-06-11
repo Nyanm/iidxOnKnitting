@@ -1,10 +1,10 @@
-//! Top-level render pipeline: archive unpack -> chart parse -> keysound decode ->
+//! Top-level render pipeline: input resolution -> chart parse -> keysound decode ->
 //! timeline mix -> Opus encode. This is the crate's single public entry point.
 
 use crate::chart::{self, Difficulty};
 use crate::codec;
 use crate::mix;
-use crate::s3p;
+use crate::source;
 
 use std::path::Path;
 
@@ -12,20 +12,15 @@ use anyhow::{Result, ensure};
 
 /// Render one IIDX song to an Ogg/Opus file. This is the shape called from iidxOnEar.
 ///
-/// - `s3p_path`    keysound archive (S3P0 container, WMAv2 payloads)
-/// - `chart_path`  chart file (.1)
+/// - `input_path`  one song: a v30+ loose folder, or an `.ifs` archive (v1-29)
 /// - `difficulty`  which chart slot to render (any difficulty reconstructs the same song)
 /// - `output_path` destination .ogg (Ogg/Opus)
-pub fn render_song(
-    s3p_path: &Path,
-    chart_path: &Path,
-    difficulty: Difficulty,
-    output_path: &Path,
-) -> Result<()> {
-    // unpack the keysound archive (index i -> 1-based sample i+1)
-    let vec_keysound = s3p::unpack(s3p_path)?;
+pub fn render_song(input_path: &Path, difficulty: Difficulty, output_path: &Path) -> Result<()> {
+    // resolve the input into ordered keysound blobs + raw chart bytes (era-agnostic)
+    let song_source = source::resolve(input_path)?;
+    let vec_keysound = &song_source.vec_keysound;
     // parse the chosen difficulty into a flat list of sounding events
-    let parsed_chart = chart::parse(chart_path, difficulty)?;
+    let parsed_chart = chart::parse(&song_source.bytes_chart, difficulty)?;
 
     // decode each referenced keysound once into a 44.1k stereo PCM cache
     let mut vec_pcm_cache: Vec<Option<Vec<f32>>> = vec![None; vec_keysound.len()];

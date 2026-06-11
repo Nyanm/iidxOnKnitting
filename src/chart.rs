@@ -10,9 +10,6 @@
 
 use crate::bytes::{read_u16_le, read_u32_le};
 
-use std::fs;
-use std::path::Path;
-
 use anyhow::{Context, Result, ensure};
 
 const SLOT_COUNT: usize = 14;             // .1 header slot count (offset/length pairs)
@@ -102,23 +99,19 @@ impl EventType {
     }
 }
 
-/// Parse one difficulty out of a .1 chart into a flat list of sounding events.
-pub fn parse(chart_path: &Path, difficulty: Difficulty) -> Result<Chart> {
-    let bytes_chart =
-        fs::read(chart_path).with_context(|| format!("reading chart {}", chart_path.display()))?;
+/// Parse one difficulty out of a .1 chart (raw bytes) into a flat list of sounding events.
+pub fn parse(bytes_chart: &[u8], difficulty: Difficulty) -> Result<Chart> {
     ensure!(
         bytes_chart.len() >= SLOT_COUNT * EVENT_LEN,
-        "chart too small for a {SLOT_COUNT}-slot header: {}",
-        chart_path.display()
+        "chart too small for a {SLOT_COUNT}-slot header"
     );
 
     let slot = difficulty.slot_index();
-    let offset_events = read_u32_le(&bytes_chart, slot * 8)? as usize;
-    let length_events = read_u32_le(&bytes_chart, slot * 8 + 4)? as usize;
+    let offset_events = read_u32_le(bytes_chart, slot * 8)? as usize;
+    let length_events = read_u32_le(bytes_chart, slot * 8 + 4)? as usize;
     ensure!(
         length_events > 0,
-        "difficulty {difficulty:?} (slot {slot}) is not present in {}",
-        chart_path.display()
+        "difficulty {difficulty:?} (slot {slot}) is not present in this chart"
     );
     ensure!(
         length_events % EVENT_LEN == 0,
@@ -139,12 +132,12 @@ pub fn parse(chart_path: &Path, difficulty: Difficulty) -> Result<Chart> {
     let count_events = length_events / EVENT_LEN;
     for index_event in 0..count_events {
         let base = offset_events + index_event * EVENT_LEN;
-        let time_ms = read_u32_le(&bytes_chart, base)?;
+        let time_ms = read_u32_le(bytes_chart, base)?;
         if time_ms == TIME_END_SENTINEL { continue; }
 
         let type_event = EventType::from_u8(bytes_chart[base + 4]);
         let param = bytes_chart[base + 5];
-        let value = read_u16_le(&bytes_chart, base + 6)?;
+        let value = read_u16_le(bytes_chart, base + 6)?;
 
         match type_event {
             // assign keysound `value` to lane `param` (initial or mid-song)
