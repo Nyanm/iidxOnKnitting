@@ -144,8 +144,12 @@ pub fn parse(bytes_chart: &[u8], difficulty: Difficulty) -> Result<Chart> {
             EventType::InitialAssign | EventType::AssignLane => {
                 lane_to_sample[param as usize] = value;
             }
-            // auto-play keysound `value` at this time
-            EventType::AutoPlay => events.push(Sounding { time_ms, sample_1based: value }),
+            // auto-play keysound `value` at this time (0 = "no sound", skip — as visible notes do)
+            EventType::AutoPlay => {
+                if value != 0 {
+                    events.push(Sounding { time_ms, sample_1based: value });
+                }
+            }
             // visible note: play the lane's currently assigned sample
             EventType::VisibleNoteP1 | EventType::VisibleNoteP2 => {
                 let sample = lane_to_sample[param as usize];
