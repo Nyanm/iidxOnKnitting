@@ -7,7 +7,9 @@
 //!   - `.ifs` archive (v1-29): the `.1` chart + an S3P0 (WMA) or 2DX9 (WAV) keysound archive,
 //!     read via the minimal KBin manifest reader (`ifs`).
 //! We route on the input path: a directory -> loose layout; a regular file -> `.ifs`. Container
-//! type (s3p vs 2dx) is decided by what's actually present, not by version.
+//! type (s3p vs 2dx) is decided by what's actually present, not by version. A few early songs
+//! ship several keysound `.2dx` (multi-source); we pick one by the `<id>a` > `<id>1` > `<id>`
+//! preference (an approximation — see README's "多音源" note).
 
 use crate::dx2;
 use crate::ifs;
@@ -62,30 +64,29 @@ fn resolve_loose_folder(dir: &Path) -> Result<SongSource> {
         return Ok(SongSource { vec_keysound, bytes_chart });
     }
 
-    // omnimix-revived old song stored loose: a `.2dx` keysound archive (no `<id>.s3p`)
-    let mut keysound_2dx = loose_2dx_archives(dir)?;
-    match keysound_2dx.len() {
-        1 => {
-            let path = keysound_2dx.remove(0);
-            let bytes_archive =
-                fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-            let vec_keysound =
-                dx2::unpack(&bytes_archive).with_context(|| format!("unpacking {}", path.display()))?;
-            Ok(SongSource { vec_keysound, bytes_chart })
-        }
-        0 => bail!(
-            "loose folder {} has no {id}.s3p and no keysound .2dx",
-            dir.display()
-        ),
-        count => bail!(
-            "loose folder {} has {count} keysound .2dx archives (multi-source) — not yet supported: {:?}",
-            dir.display(),
-            keysound_2dx
+    // omnimix-revived old song stored loose: `.2dx` keysound archive(s) (no `<id>.s3p`)
+    let keysound_2dx = loose_2dx_archives(dir)?;
+    let chosen = match keysound_2dx.as_slice() {
+        [] => bail!("loose folder {} has no {id}.s3p and no keysound .2dx", dir.display()),
+        [only] => only,
+        _ => {
+            let names: Vec<&str> = keysound_2dx
                 .iter()
-                .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
-                .collect::<Vec<_>>()
-        ),
-    }
+                .map(|path| path.file_name().and_then(|name| name.to_str()).unwrap_or(""))
+                .collect();
+            let index_chosen = pick_multisource(id, &names).with_context(|| {
+                format!(
+                    "multi-source loose folder {} matched none of {id}a/{id}1/{id}.2dx; found {names:?}",
+                    dir.display()
+                )
+            })?;
+            &keysound_2dx[index_chosen]
+        }
+    };
+    let bytes_archive = fs::read(chosen).with_context(|| format!("reading {}", chosen.display()))?;
+    let vec_keysound =
+        dx2::unpack(&bytes_archive).with_context(|| format!("unpacking {}", chosen.display()))?;
+    Ok(SongSource { vec_keysound, bytes_chart })
 }
 
 // Collect the non-preview `.2dx` keysound archives in a loose folder (excludes `<id>_pre.2dx`),
@@ -104,6 +105,16 @@ fn loose_2dx_archives(dir: &Path) -> Result<Vec<PathBuf>> {
     }
     archives.sort();
     Ok(archives)
+}
+
+// Multi-source songs ship several keysound `.2dx`; pick one by the preference `<id>a` > `<id>1`
+// > `<id>` (the `<id>a` variant is usually the modern, re-added version — see README). `names`
+// are the candidate archive file names; returns the index of the first preference that matches.
+fn pick_multisource(id: &str, names: &[&str]) -> Option<usize> {
+    ["a", "1", ""].iter().find_map(|suffix| {
+        let wanted = format!("{id}{suffix}.2dx");
+        names.iter().position(|name| *name == wanted)
+    })
 }
 
 // v1-29 .ifs: read the KBin manifest, take the `.1` chart and the `.s3p` keysound archive.
@@ -131,19 +142,24 @@ fn resolve_ifs(file: &Path) -> Result<SongSource> {
         .iter()
         .filter(|member| member.name.ends_with(".2dx") && !member.name.ends_with("_pre.2dx"))
         .collect();
-    match members_2dx.as_slice() {
-        [member_2dx] => {
-            let bytes_archive = &bytes_ifs[member_2dx.offset..member_2dx.offset + member_2dx.size];
-            let vec_keysound = dx2::unpack(bytes_archive)
-                .with_context(|| format!("unpacking {} from {}", member_2dx.name, file.display()))?;
-            Ok(SongSource { vec_keysound, bytes_chart })
-        }
+    // single keysound `.2dx`, or multi-source -> pick by `<id>a` > `<id>1` > `<id>` (see README)
+    let member_2dx = match members_2dx.as_slice() {
         [] => bail!("no .s3p or .2dx keysound archive inside {}", file.display()),
-        many => bail!(
-            "{} has {} keysound .2dx archives (multi-source) — not yet supported: {:?}",
-            file.display(),
-            many.len(),
-            many.iter().map(|member| &member.name).collect::<Vec<_>>()
-        ),
-    }
+        [only] => *only,
+        _ => {
+            let id = member_chart.name.strip_suffix(".1").unwrap_or(member_chart.name.as_str());
+            let names: Vec<&str> = members_2dx.iter().map(|member| member.name.as_str()).collect();
+            let index_chosen = pick_multisource(id, &names).with_context(|| {
+                format!(
+                    "multi-source {} matched none of {id}a/{id}1/{id}.2dx; found {names:?}",
+                    file.display()
+                )
+            })?;
+            members_2dx[index_chosen]
+        }
+    };
+    let bytes_archive = &bytes_ifs[member_2dx.offset..member_2dx.offset + member_2dx.size];
+    let vec_keysound = dx2::unpack(bytes_archive)
+        .with_context(|| format!("unpacking {} from {}", member_2dx.name, file.display()))?;
+    Ok(SongSource { vec_keysound, bytes_chart })
 }

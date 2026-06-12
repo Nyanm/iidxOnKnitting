@@ -22,6 +22,11 @@ IIDX on Knitting是一款BMS风格的，将谱面key音渲染在歌曲的背景�
 | `-i, --input <folder.ifs>` | **必填**。IIDX的歌曲文件，v1-v29 为以歌曲id命名的`.ifs`文件，v30~ 为以歌曲id命名的文件夹 |
 | `-o, --output out.ogg`     | **必填**。音频文件输出地址                                             |
 
+> **多音源曲的取舍**：极少数早期曲在一个文件夹 / `.ifs` 内含多个键音 `.2dx`（本库实测约 68 首，多为
+> 新旧两版，或按难度分的音源）。此时程序按 `<id>a` → `<id>1` → `<id>` 的优先级**自动选其一**渲染——
+> `<id>a` 通常是现代复活 / 重做版（如初代曲 01000 的 `01000a`）。**这是个近似取舍**：所选未必对每个难度都是
+> "原配"音源，但能保证这些曲也出声。想逐版本试听可用 `.script/render_multisource.py`。
+
 ## 第三方代码声明
 
 `src/ifs.rs`中关于解析IFS文件的代码参考了[![ifstools](https://img.shields.io/badge/ifstools-blue)](https://github.com/mon/ifstools)和[![kbinxml](https://img.shields.io/badge/kbinxml-blue)](https://github.com/mon/kbinxml)的实现。
@@ -67,6 +72,13 @@ Command-line arguments:
 |------------------------------|----------------------------------------------------------------------------------------------------------|
 | `-i, --input <folder\|.ifs>` | **Required.** An IIDX song: a `.ifs` named by song id for v1–v29, or a folder named by song id for v30+. |
 | `-o, --output out.ogg`       | **Required.** Output audio path.                                                                         |
+
+> **Multi-source trade-off**: a few early songs pack multiple keysound `.2dx` archives in one
+> folder / `.ifs` (~68 in this dataset — usually an old-vs-re-added pair, or per-difficulty sound
+> sets). The renderer **auto-selects one** by the preference `<id>a` → `<id>1` → `<id>`; `<id>a`
+> is usually the modern, re-added version (e.g. `01000a` for the 1st-gen song 01000). **This is an
+> approximation** — the chosen archive is not guaranteed to be the "correct" arrangement for every
+> difficulty, but it lets these songs render.
 
 ## Third-Party Code Notice
 
