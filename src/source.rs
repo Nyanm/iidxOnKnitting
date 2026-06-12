@@ -1,20 +1,20 @@
 //! Input resolution: turn a single user-supplied path into the renderer's raw inputs — the
 //! ordered keysound blobs and the chart bytes — regardless of how the song is packaged on disk.
 //!
-//! IIDX ships a song three ways (see ROADMAP / STRUCTURE.md):
-//!   - v30+   : a loose folder `<id>/` holding `<id>.s3p` + `<id>.1` (+ `<id>_pre.2dx`).
-//!   - v25-29 : an `.ifs` archive wrapping an S3P0 keysound archive + the `.1` chart.
-//!   - v1-24  : an `.ifs` archive wrapping a 2DX9 keysound archive + the `.1` chart.
-//! We route on the input path alone: a directory is the v30+ loose layout; a regular file is
-//! an `.ifs`, whose members we read via the minimal KBin manifest reader (`ifs`). The s3p case
-//! (v25-29 and any s3p-packed song) is handled; 2dx-packed songs (v1-24 + 2dx songs) are Step 8.
+//! IIDX packages a song a few ways (see ROADMAP / STRUCTURE.md):
+//!   - loose folder `<id>/` (v30+, or omnimix-revived old songs): `<id>.1` + either `<id>.s3p`
+//!     (WMA keysounds) or a loose `<id>.2dx` (WAV keysounds), plus an `<id>_pre.2dx` preview.
+//!   - `.ifs` archive (v1-29): the `.1` chart + an S3P0 (WMA) or 2DX9 (WAV) keysound archive,
+//!     read via the minimal KBin manifest reader (`ifs`).
+//! We route on the input path: a directory -> loose layout; a regular file -> `.ifs`. Container
+//! type (s3p vs 2dx) is decided by what's actually present, not by version.
 
 use crate::dx2;
 use crate::ifs;
 use crate::s3p;
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 
@@ -33,35 +33,77 @@ pub fn resolve(input: &Path) -> Result<SongSource> {
     }
 }
 
-// v30+ loose folder: the folder name is the song id; it holds `<id>.s3p` and `<id>.1`.
+// A loose song folder (folder name = song id). v30+ ships `<id>.s3p`; omnimix-revived old songs
+// may instead ship a loose `<id>.2dx`. Either way the chart is `<id>.1`.
 fn resolve_loose_folder(dir: &Path) -> Result<SongSource> {
     let id = dir
         .file_name()
         .and_then(|name| name.to_str())
         .with_context(|| format!("cannot derive song id from folder {}", dir.display()))?;
-    let s3p_path = dir.join(format!("{id}.s3p"));
+
+    // the chart is required in either layout
     let chart_path = dir.join(format!("{id}.1"));
-    ensure!(
-        s3p_path.exists(),
-        "expected keysound archive {} in loose folder {}",
-        s3p_path.display(),
-        dir.display()
-    );
     ensure!(
         chart_path.exists(),
         "expected chart {} in loose folder {}",
         chart_path.display(),
         dir.display()
     );
-
-    let bytes_archive =
-        fs::read(&s3p_path).with_context(|| format!("reading {}", s3p_path.display()))?;
-    let vec_keysound =
-        s3p::unpack(&bytes_archive).with_context(|| format!("unpacking {}", s3p_path.display()))?;
     let bytes_chart =
         fs::read(&chart_path).with_context(|| format!("reading {}", chart_path.display()))?;
 
-    Ok(SongSource { vec_keysound, bytes_chart })
+    // v30+ keysound archive: `<id>.s3p` (WMA)
+    let s3p_path = dir.join(format!("{id}.s3p"));
+    if s3p_path.exists() {
+        let bytes_archive =
+            fs::read(&s3p_path).with_context(|| format!("reading {}", s3p_path.display()))?;
+        let vec_keysound =
+            s3p::unpack(&bytes_archive).with_context(|| format!("unpacking {}", s3p_path.display()))?;
+        return Ok(SongSource { vec_keysound, bytes_chart });
+    }
+
+    // omnimix-revived old song stored loose: a `.2dx` keysound archive (no `<id>.s3p`)
+    let mut keysound_2dx = loose_2dx_archives(dir)?;
+    match keysound_2dx.len() {
+        1 => {
+            let path = keysound_2dx.remove(0);
+            let bytes_archive =
+                fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+            let vec_keysound =
+                dx2::unpack(&bytes_archive).with_context(|| format!("unpacking {}", path.display()))?;
+            Ok(SongSource { vec_keysound, bytes_chart })
+        }
+        0 => bail!(
+            "loose folder {} has no {id}.s3p and no keysound .2dx",
+            dir.display()
+        ),
+        count => bail!(
+            "loose folder {} has {count} keysound .2dx archives (multi-source) — not yet supported: {:?}",
+            dir.display(),
+            keysound_2dx
+                .iter()
+                .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
+                .collect::<Vec<_>>()
+        ),
+    }
+}
+
+// Collect the non-preview `.2dx` keysound archives in a loose folder (excludes `<id>_pre.2dx`),
+// sorted for a deterministic result.
+fn loose_2dx_archives(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut archives = Vec::new();
+    for entry in fs::read_dir(dir).with_context(|| format!("listing {}", dir.display()))? {
+        let path = entry.with_context(|| format!("reading an entry in {}", dir.display()))?.path();
+        let is_keysound = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".2dx") && !name.ends_with("_pre.2dx"));
+        if is_keysound {
+            archives.push(path);
+        }
+    }
+    archives.sort();
+    Ok(archives)
 }
 
 // v1-29 .ifs: read the KBin manifest, take the `.1` chart and the `.s3p` keysound archive.

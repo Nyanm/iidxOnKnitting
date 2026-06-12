@@ -1,6 +1,6 @@
 [package]
 name = "iidxOnKnitting"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 # Library surface (embeddable into iidxOnEar) plus a thin CLI binary over it.
