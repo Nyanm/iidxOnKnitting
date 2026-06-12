@@ -339,6 +339,6 @@ fn receive_and_mux(
 unsafe extern "C" {
     fn av_frame_get_buffer(
         frame: *mut ffmpeg_the_third::ffi::AVFrame,
-        align: std::ffi::c_int,
-    ) -> std::ffi::c_int;
+        align: c_int,
+    ) -> c_int;
 }
