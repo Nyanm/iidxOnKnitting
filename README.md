@@ -29,7 +29,7 @@ IIDX on Knitting是一款BMS风格的，将谱面key音渲染在歌曲的背景�
 
 ## 第三方代码声明
 
-`src/ifs.rs`中关于解析IFS文件的代码参考了[![ifstools](https://img.shields.io/badge/ifstools-blue)](https://github.com/mon/ifstools)和[![kbinxml](https://img.shields.io/badge/kbinxml-blue)](https://github.com/mon/kbinxml)的实现。
+`src/tool/ifs.rs`中关于解析IFS文件的代码参考了[![ifstools](https://img.shields.io/badge/ifstools-blue)](https://github.com/mon/ifstools)和[![kbinxml](https://img.shields.io/badge/kbinxml-blue)](https://github.com/mon/kbinxml)的实现。
 
 | 组件                                                            | 版本    | 来源                        | 许可证               |
 |---------------------------------------------------------------|-------|---------------------------|-------------------|
@@ -82,7 +82,7 @@ Command-line arguments:
 
 ## Third-Party Code Notice
 
-The IFS-parsing code in `src/ifs.rs` is based on the implementations of [![ifstools](https://img.shields.io/badge/ifstools-blue)](https://github.com/mon/ifstools) and [![kbinxml](https://img.shields.io/badge/kbinxml-blue)](https://github.com/mon/kbinxml).
+The IFS-parsing code in `src/tool/ifs.rs` is based on the implementations of [![ifstools](https://img.shields.io/badge/ifstools-blue)](https://github.com/mon/ifstools) and [![kbinxml](https://img.shields.io/badge/kbinxml-blue)](https://github.com/mon/kbinxml).
 
 | Component                                                     | Version | Source                    | License           |
 |---------------------------------------------------------------|---------|---------------------------|-------------------|

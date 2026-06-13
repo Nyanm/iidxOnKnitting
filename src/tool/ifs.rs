@@ -10,7 +10,7 @@
 //! prefix); we reverse that so callers can match `.s3p` / `.2dx` / `.1` by extension.
 //! Reference: ifstools (github.com/mon/ifstools) and kbinxml (github.com/mon/kbinxml).
 
-use crate::bytes::read_u32_be;
+use crate::tool::bytes::read_u32_be;
 
 use anyhow::{Context, Result, bail, ensure};
 

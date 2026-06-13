@@ -5,15 +5,13 @@
 //! public API. All business logic lives in the submodules. The crate is built to be
 //! embedded into iidxOnEar as a library; `render_song` is the single entry point.
 
-mod bytes;
 mod chart;
 mod codec;
-mod dx2;
-mod ifs;
 mod mix;
 mod render;
-mod s3p;
 mod source;
+mod tool; // tool::bytes, tool::ifs
+mod unpack; // unpack_s3p, unpack_2dx
 
 pub use chart::Difficulty;
 pub use render::render_song;

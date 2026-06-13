@@ -8,7 +8,7 @@
 //! flat list of "sounding" events (a sample number to play at a time). Any difficulty
 //! reconstructs the same song, so the renderer defaults to SPN.
 
-use crate::bytes::{read_u16_le, read_u32_le};
+use crate::tool::bytes::{read_u16_le, read_u32_le};
 
 use anyhow::{Context, Result, ensure};
 
@@ -75,15 +75,16 @@ pub struct Chart {
     pub duration_ms: u32,      // last real event time (excludes the end sentinel)
 }
 
-/// Chart event kind, decoded from the raw u8 type field. Only the audio-relevant kinds are
-/// named; bar line / BPM / end / metadata (types 4/5/6/12/16) collapse into `Other`.
+/// Chart event kind, decoded from the raw u8 type field. Only the audio-relevant kinds plus the
+/// end-of-chart marker are named; bar line / BPM / metadata (types 4/5/12/16) collapse into `Other`.
 enum EventType {
     VisibleNoteP1, // 0: P1 visible note (plays its lane's assigned sample)
     VisibleNoteP2, // 1: P2 visible note (DP)
     AssignLane,    // 2: assign keysound `value` to lane `param`
+    End,           // 6: end of chart — events after it are padding (sentinel/junk times)
     AutoPlay,      // 7: auto-play keysound `value`
     InitialAssign, // 8: initial lane->sample assignment at song start
-    Other,         // 4/5/6/12/16 etc.: not audio
+    Other,         // 4/5/12/16 etc.: not audio
 }
 
 impl EventType {
@@ -92,6 +93,7 @@ impl EventType {
             0 => Self::VisibleNoteP1,
             1 => Self::VisibleNoteP2,
             2 => Self::AssignLane,
+            6 => Self::End,
             7 => Self::AutoPlay,
             8 => Self::InitialAssign,
             _ => Self::Other,
@@ -157,7 +159,14 @@ pub fn parse(bytes_chart: &[u8], difficulty: Difficulty) -> Result<Chart> {
                     events.push(Sounding { time_ms, sample_1based: sample });
                 }
             }
-            // bar line / BPM / end / metadata — not audio
+            // end of chart: take its time as the song length and stop. Any events after it are
+            // padding stamped with sentinel / near-sentinel times (e.g. 15302's 0x7FFFFF37) that
+            // the exact-sentinel skip above misses and that would blow the timeline up to ~757 GB.
+            EventType::End => {
+                duration_ms = duration_ms.max(time_ms);
+                break;
+            }
+            // bar line / BPM / metadata — not audio
             EventType::Other => {}
         }
 

@@ -11,9 +11,8 @@
 //! ship several keysound `.2dx` (multi-source); we pick one by the `<id>a` > `<id>1` > `<id>`
 //! preference (an approximation — see README's "多音源" note).
 
-use crate::dx2;
-use crate::ifs;
-use crate::s3p;
+use crate::tool::ifs;
+use crate::unpack;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -43,6 +42,12 @@ fn resolve_loose_folder(dir: &Path) -> Result<SongSource> {
         .and_then(|name| name.to_str())
         .with_context(|| format!("cannot derive song id from folder {}", dir.display()))?;
 
+    // some omnimix loose folders hold a packed `<id>.ifs` (e.g. 29083) instead of loose members
+    let ifs_path = dir.join(format!("{id}.ifs"));
+    if ifs_path.exists() {
+        return resolve_ifs(&ifs_path);
+    }
+
     // the chart is required in either layout
     let chart_path = dir.join(format!("{id}.1"));
     ensure!(
@@ -60,7 +65,7 @@ fn resolve_loose_folder(dir: &Path) -> Result<SongSource> {
         let bytes_archive =
             fs::read(&s3p_path).with_context(|| format!("reading {}", s3p_path.display()))?;
         let vec_keysound =
-            s3p::unpack(&bytes_archive).with_context(|| format!("unpacking {}", s3p_path.display()))?;
+            unpack::unpack_s3p(&bytes_archive).with_context(|| format!("unpacking {}", s3p_path.display()))?;
         return Ok(SongSource { vec_keysound, bytes_chart });
     }
 
@@ -85,7 +90,7 @@ fn resolve_loose_folder(dir: &Path) -> Result<SongSource> {
     };
     let bytes_archive = fs::read(chosen).with_context(|| format!("reading {}", chosen.display()))?;
     let vec_keysound =
-        dx2::unpack(&bytes_archive).with_context(|| format!("unpacking {}", chosen.display()))?;
+        unpack::unpack_2dx(&bytes_archive).with_context(|| format!("unpacking {}", chosen.display()))?;
     Ok(SongSource { vec_keysound, bytes_chart })
 }
 
@@ -133,7 +138,7 @@ fn resolve_ifs(file: &Path) -> Result<SongSource> {
     // keysound archive: prefer `.s3p` (v25-29 + s3p songs); else the single `.2dx` (v1-24 + 2dx songs)
     if let Some(member_s3p) = members.iter().find(|member| member.name.ends_with(".s3p")) {
         let bytes_archive = &bytes_ifs[member_s3p.offset..member_s3p.offset + member_s3p.size];
-        let vec_keysound = s3p::unpack(bytes_archive)
+        let vec_keysound = unpack::unpack_s3p(bytes_archive)
             .with_context(|| format!("unpacking {} from {}", member_s3p.name, file.display()))?;
         return Ok(SongSource { vec_keysound, bytes_chart });
     }
@@ -159,7 +164,7 @@ fn resolve_ifs(file: &Path) -> Result<SongSource> {
         }
     };
     let bytes_archive = &bytes_ifs[member_2dx.offset..member_2dx.offset + member_2dx.size];
-    let vec_keysound = dx2::unpack(bytes_archive)
+    let vec_keysound = unpack::unpack_2dx(bytes_archive)
         .with_context(|| format!("unpacking {} from {}", member_2dx.name, file.display()))?;
     Ok(SongSource { vec_keysound, bytes_chart })
 }
