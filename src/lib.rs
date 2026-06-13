@@ -14,4 +14,4 @@ mod tool; // tool::bytes, tool::ifs
 mod unpack; // unpack_s3p, unpack_2dx
 
 pub use chart::Difficulty;
-pub use render::render_song;
+pub use render::{RenderError, convert_song, render_song};
