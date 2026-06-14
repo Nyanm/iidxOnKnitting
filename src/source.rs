@@ -7,10 +7,11 @@
 //!   - `.ifs` archive (v1-29): the `.1` chart + an S3P0 (WMA) or 2DX9 (WAV) keysound archive,
 //!     read via the minimal KBin manifest reader (`ifs`).
 //!
-//! `locate` does the routing once (directory -> loose layout; regular file -> `.ifs`; container
-//! type decided by what's present, not by version) and returns the raw, not-yet-unpacked parts.
-//! Two consumers build on it: `resolve` unpacks the keysound archive for the renderer, while
-//! `resolve_audio` returns the archive file as-is for `convert_song`. A few early songs ship
+//! `locate` does the routing once (directory -> loose layout; regular file -> `.ifs`, or a bare
+//! SDVX `.s3v`/`.2dx` audio file; container type decided by what's present, not by version) and
+//! returns the raw, not-yet-unpacked parts. Two consumers build on it: `resolve` unpacks the
+//! keysound archive for the renderer, while `resolve_audio` returns the archive file as-is for
+//! `convert_song`. A few early songs ship
 //! several keysound `.2dx` (multi-source); we pick one by the `<id>a` > `<id>1` > `<id>`
 //! preference (an approximation — see README's "多音源" note).
 
@@ -33,6 +34,8 @@ pub struct SongSource {
 enum ArchiveKind {
     S3p,
     Dx2,
+    // a bare single-audio file (e.g. SDVX `.s3v`/`.2dx`): no chart, decode the bytes as-is
+    Single,
 }
 
 // A located-but-not-unpacked song: raw chart bytes + the raw keysound-archive file + its format.
@@ -45,8 +48,9 @@ struct Located {
 
 /// Resolve a single input path into a `SongSource` (ordered keysound blobs + chart bytes).
 ///
-/// Returns [`RenderError::NotKeysound`] when the input's audio is a single pre-mixed file (a RIFF
-/// `.2dx`) with no keysounds to reconstruct — the caller should use `convert_song` instead.
+/// Returns [`RenderError::NotKeysound`] when the input is a single audio file with no keysounds to
+/// reconstruct — a pre-mixed RIFF `.2dx`, or a bare SDVX `.s3v`/`.2dx`. The caller should hand that
+/// same input to `convert_song` instead.
 pub fn resolve(input: &Path) -> Result<SongSource, RenderError> {
     let located = locate(input)?;
     let vec_keysound = match located.kind {
@@ -61,6 +65,9 @@ pub fn resolve(input: &Path) -> Result<SongSource, RenderError> {
             }
             unpack::unpack_2dx(&located.bytes_archive).context("unpacking 2dx keysound archive")?
         }
+        // a bare single-audio file (SDVX `.s3v`/`.2dx`): no chart to reconstruct from — the caller
+        // should transcode it with convert_song.
+        ArchiveKind::Single => return Err(RenderError::NotKeysound),
     };
     Ok(SongSource { vec_keysound, bytes_chart: located.bytes_chart })
 }
@@ -72,10 +79,11 @@ pub fn resolve_audio(input: &Path) -> Result<Vec<u8>, RenderError> {
     Ok(locate(input)?.bytes_archive)
 }
 
-// Route the input to its raw parts: a directory -> loose layout, a regular file -> `.ifs`.
+// Route the input to its raw parts: a directory -> loose layout, a regular file -> `.ifs` archive
+// (or a bare SDVX `.s3v`/`.2dx` audio file).
 fn locate(input: &Path) -> Result<Located> {
     if input.is_dir() { locate_loose_folder(input) }  // v30+ loose layout
-    else { locate_ifs(input) }  // v1-29 packed in .ifs
+    else { locate_single(input) }  // v1-29 .ifs, or a bare SDVX audio file
 }
 
 // A loose song folder (folder name = song id). v30+ ships `<id>.s3p`; omnimix-revived old songs
@@ -89,7 +97,7 @@ fn locate_loose_folder(dir: &Path) -> Result<Located> {
     // some omnimix loose folders hold a packed `<id>.ifs` (e.g. 29083) instead of loose members
     let ifs_path = dir.join(format!("{id}.ifs"));
     if ifs_path.exists() {
-        return locate_ifs(&ifs_path);
+        return locate_single(&ifs_path);
     }
 
     // the chart is required in either layout
@@ -162,8 +170,21 @@ fn pick_multisource(id: &str, names: &[&str]) -> Option<usize> {
     })
 }
 
-// v1-29 .ifs: read the KBin manifest, take the `.1` chart and the `.s3p`/`.2dx` keysound archive.
-fn locate_ifs(file: &Path) -> Result<Located> {
+// A single regular-file input: a bare SDVX `.s3v` audio file (returned as-is), or an IIDX
+// v1-29 `.ifs` archive (read via the KBin manifest -> `.1` chart + `.s3p`/`.2dx` keysound archive).
+fn locate_single(file: &Path) -> Result<Located> {
+    // SDVX: a `.s3v`` file is the playable audio itself — return its bytes as-is. `resolve`
+    // maps `Single` to NotKeysound so the caller transcodes it with convert_song; `resolve_audio`
+    // hands these bytes straight to the decoder. Only an actual `.ifs` falls through below.
+    if let Some(extension) = file.extension().and_then(|ext| ext.to_str()) {
+        if extension.eq_ignore_ascii_case("s3v") {
+            let bytes_archive =
+                fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+            return Ok(Located { bytes_chart: Vec::new(), bytes_archive, kind: ArchiveKind::Single });
+        }
+    }
+
+    // v1-29 .ifs: read the KBin manifest, take the `.1` chart and the `.s3p`/`.2dx` keysound archive.
     let bytes_ifs = fs::read(file).with_context(|| format!("reading {}", file.display()))?;
     let members = ifs::list_members(&bytes_ifs)
         .with_context(|| format!("{} is neither a loose folder nor a readable .ifs", file.display()))?;

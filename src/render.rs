@@ -11,6 +11,10 @@ use std::path::Path;
 
 use anyhow::anyhow;
 
+// global allocator: mimalloc's per-thread heaps avoid the default Windows heap-lock contention under the worker pool
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// How a render failed, so the caller can branch. The intended use is to try `render_song` and,
 /// when it returns [`RenderError::NotKeysound`], fall back to [`convert_song`] on the same input.
 #[derive(Debug, thiserror::Error)]
