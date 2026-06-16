@@ -4,7 +4,7 @@
 
 IIDX on Knitting是一款BMS风格的，将谱面key音渲染在歌曲的背景音频文件中，最终导出为完整的Opus编码歌曲的程序。
 程序实现了修剪版的FFmpeg静态链接集成和一个极简版的IFS/KBIN解析器，一站式实现从IFS信息提取，WMA/WAV/MS-ADPCM解码，PCM混音，OPUS编码与OGG封装的全流程。
-程序覆盖初代到32代全部歌曲文件的转换功能。
+程序覆盖初代到32代全部歌曲文件的转换功能。程序同时实现了SDVX中对于.s3v和.2dx音频文件的格式转换。
 
 本程序不包含任何所属©Konami Arcade Games版权所有的信息。
 
@@ -12,15 +12,6 @@ IIDX on Knitting是一款BMS风格的，将谱面key音渲染在歌曲的背景�
 
 使用`cargo build -r`进行编译。`/vendor`内存放编译好的裁剪版FFmpeg二进制lib，无需再次编译，无需系统FFmpeg。
 程序初次clean构建依赖LLVM + VS 2022 MSVC 工具链，增量构建不需要。
-
-程序的参数如下：
-
-`iidxOnKnitting --input <folder|.ifs> --output out.ogg`
-
-| 参数                         | 说明                                                          |
-|----------------------------|-------------------------------------------------------------|
-| `-i, --input <folder.ifs>` | **必填**。IIDX的歌曲文件，v1-v29 为以歌曲id命名的`.ifs`文件，v30~ 为以歌曲id命名的文件夹 |
-| `-o, --output out.ogg`     | **必填**。音频文件输出地址                                             |
 
 > **多音源曲的取舍**：极少数早期曲在一个文件夹 / `.ifs` 内含多个键音 `.2dx`（本库实测约 68 首，多为
 > 新旧两版，或按难度分的音源）。此时程序按 `<id>a` → `<id>1` → `<id>` 的优先级**自动选其一**渲染——
@@ -55,7 +46,7 @@ IIDX on Knitting是一款BMS风格的，将谱面key音渲染在歌曲的背景�
 
 IIDX on Knitting is a BMS-style renderer: it lays a chart's keysounds onto the song's background-audio bed and exports the result as a complete, Opus-encoded track.
 It statically links a trimmed FFmpeg build together with a minimal IFS/KBIN parser, covering the entire pipeline in one pass — IFS extraction, WMA/WAV/MS-ADPCM decoding, PCM mixing, Opus encoding, and Ogg muxing.
-It converts song files from the very first generation through IIDX 32.
+It converts song files from the very first generation through IIDX 32. It also achieves the format transmission of .s3v file and .2dx file in SDVX.
 
 This program contains no information whose copyright belongs to © Konami Arcade Games.
 
@@ -63,15 +54,6 @@ This program contains no information whose copyright belongs to © Konami Arcade
 
 Build it with `cargo build -r`. The `/vendor` directory ships the prebuilt, trimmed FFmpeg static libs, so there is no need to recompile FFmpeg or to install a system FFmpeg.
 A first clean build requires the LLVM + VS 2022 MSVC toolchains; incremental builds do not.
-
-Command-line arguments:
-
-`iidxOnKnitting --input <folder|.ifs> --output out.ogg`
-
-| Argument                     | Description                                                                                              |
-|------------------------------|----------------------------------------------------------------------------------------------------------|
-| `-i, --input <folder\|.ifs>` | **Required.** An IIDX song: a `.ifs` named by song id for v1–v29, or a folder named by song id for v30+. |
-| `-o, --output out.ogg`       | **Required.** Output audio path.                                                                         |
 
 > **Multi-source trade-off**: a few early songs pack multiple keysound `.2dx` archives in one
 > folder / `.ifs` (~68 in this dataset — usually an old-vs-re-added pair, or per-difficulty sound

@@ -9,9 +9,8 @@ mod chart;
 mod codec;
 mod mix;
 mod render;
-mod source;
 mod tool; // tool::bytes, tool::ifs
 mod unpack; // unpack_s3p, unpack_2dx
 
 pub use chart::Difficulty;
-pub use render::{RenderError, convert_song, render_song};
+pub use render::{RenderError, convert_packed_song, convert_song, render_packed_song, render_song};
