@@ -167,11 +167,11 @@ fn pick_multisource(id: &str, names: &[&str]) -> Option<usize> {
 // ── convert: transcode a single pre-mixed audio file as-is ───────────────────────────────────────
 
 /// Transcode a single decodable audio file (a pre-mixed `.2dx`, an SDVX `.s3v`, …) to Ogg/Opus.
-/// The file is demuxed directly — no chart, no keysound reconstruction. If it is actually a 2DX9
-/// container (which ffmpeg cannot demux), this fails; the caller should use [`convert_packed_song`].
+/// The file is demuxed directly — no chart, no keysound reconstruction. Returns
+/// [`RenderError::NotSingleAudio`] if it is actually a 2DX9 container (use [`convert_packed_song`]).
 pub fn convert_song(audio_path: &Path, output_path: &Path) -> Result<(), RenderError> {
     let bytes_audio = fs::read(audio_path).with_context(|| format!("reading {}", audio_path.display()))?;
-    if unpack::unpack_2dx(&bytes_audio).is_ok_and(|payloads| !payloads.is_empty()) {
+    if unpack::is_2dx9(&bytes_audio) {
         return Err(RenderError::NotSingleAudio);
     }
     convert_bytes(&bytes_audio, output_path)

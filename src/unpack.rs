@@ -116,3 +116,21 @@ pub fn unpack_2dx(bytes_archive: &[u8]) -> Result<Vec<Vec<u8>>> {
     }
     Ok(vec_keysound)
 }
+
+/// Cheaply test whether `bytes_archive` is a 2DX9 container — a non-zero entry count plus a `2DX9`
+/// magic on the first block — without extracting any payloads. Distinguishes a packed `.2dx` from a
+/// bare RIFF/WAVE or ASF audio file (which start with other magic, and whose 0x14 often reads 0).
+pub fn is_2dx9(bytes_archive: &[u8]) -> bool {
+    let count_entries = match read_u32_le(bytes_archive, FILE_COUNT_OFFSET) {
+        Ok(count) => count,
+        Err(_) => return false,
+    };
+    if count_entries == 0 {
+        return false;
+    }
+    let offset_block = match read_u32_le(bytes_archive, OFFSET_TABLE_BASE) {
+        Ok(offset) => offset as usize,
+        Err(_) => return false,
+    };
+    bytes_archive.get(offset_block..offset_block + 4) == Some(&DX2_MAGIC[..])
+}
