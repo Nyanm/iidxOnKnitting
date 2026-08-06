@@ -1,7 +1,9 @@
 //! Keysound-archive unpacking. Two flat container formats, each flattened to an ordered
 //! `Vec<Vec<u8>>` where index N-1 is the chart's 1-based sample N:
-//!   - S3P0 (`.s3p`, v25+): WMAv2 keysounds — `unpack_s3p`.
-//!   - 2DX9 (`.2dx`, v1-24): WAV/MS-ADPCM keysounds — `unpack_2dx`.
+//!   - S3P0 (`.s3p`, IIDX v25+): WMAv2 keysounds — `unpack_s3p`.
+//!   - 2DX9 (`.2dx`, IIDX v1-24, and SDVX's BGM container): WAV/MS-ADPCM — `unpack_2dx`.
+//! 2DX9 is why this module is not IIDX-only: SDVX ships its single pre-mixed track in one, which
+//! `convert_packed_song` reads through `unpack_2dx` / `is_2dx9`. GITADORA uses neither format.
 //! All integers are little-endian. (The container that *holds* these — `.ifs` / KBin — is parsed
 //! in `tool::ifs` and is big-endian.)
 

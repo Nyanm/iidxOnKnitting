@@ -6,6 +6,7 @@
 //! dominated runtime, ~6ms/keysound). The decode loop resamples to f32/stereo/44100 (the
 //! keysound native rate) so the mixer can sum without per-sample rate conversion.
 
+use std::borrow::Cow;
 use std::ffi::{c_int, c_void};
 use std::path::Path;
 use std::ptr;
@@ -15,7 +16,9 @@ use std::sync::Once;
 use anyhow::{Context, Result, anyhow, ensure};
 use ffmpeg_the_third as ffmpeg;
 
-const KEYSOUND_RATE: u32 = 44_100; // all IIDX s3p keysounds are 44.1k stereo (see S3P_FORMAT.md)
+/// The rate [`decode_keysound`] resamples to. IIDX and SDVX audio is all 44.1 kHz, so their
+/// pipelines mix there and resample once at encode time; GITADORA is 48 kHz and bypasses that.
+pub const KEYSOUND_RATE: u32 = 44_100;
 
 static INIT: Once = Once::new();
 
@@ -215,18 +218,22 @@ fn read_stereo_packed(frame: &ffmpeg::frame::Audio) -> &[f32] {
 }
 
 // ── Opus encode (Step 6) ───────────────────────────────────────────────────────
-// Encode a mixed 44.1k stereo f32 timeline to Ogg/Opus: resample 44.1k -> 48k (libopus only
-// accepts 48k), then chunk into 20 ms (960-sample) frames, encode, and mux into Ogg. Mirrors
-// the reused SDVX transcode encode half.
+// Encode a mixed stereo f32 timeline to Ogg/Opus: resample to 48k if needed (libopus only accepts
+// 48k), then chunk into 20 ms (960-sample) frames, encode, and mux into Ogg. Mirrors the reused
+// SDVX transcode encode half.
 
+const OPUS_RATE: u32 = 48_000;       // the only rate libopus accepts
 const OPUS_BITRATE: usize = 192_000; // ~transparent for the lossy WMAv2 source
 const OPUS_FRAME: usize = 960;       // 20 ms at 48 kHz, libopus's natural frame size
 const ENCODE_CHANNELS: usize = 2;    // interleaved stereo
 const FLUSH_FRAMES: usize = 8192;    // scratch size when draining the resampler tail
 
-/// Encode an interleaved stereo f32 timeline at 44.1 kHz to an Ogg/Opus file.
-pub fn encode_opus(timeline_44k: &[f32], output_path: &Path) -> Result<()> {
+/// Encode an interleaved stereo f32 timeline at `rate_in_hz` to an Ogg/Opus file. A 48 kHz input
+/// (GITADORA's native rate) bypasses the resampler entirely; 44.1 kHz (IIDX/SDVX keysounds) is
+/// resampled up first.
+pub fn encode_opus(timeline: &[f32], rate_in_hz: u32, output_path: &Path) -> Result<()> {
     ensure_init();
+    ensure!(rate_in_hz > 0, "encode_opus called with a zero input rate");
 
     let codec = ffmpeg::encoder::find_by_name("libopus")
         .ok_or_else(|| anyhow!("libopus encoder not found in vendored build"))?;
@@ -234,63 +241,28 @@ pub fn encode_opus(timeline_44k: &[f32], output_path: &Path) -> Result<()> {
         .encoder()
         .audio()
         .context("creating libopus encoder")?;
-    encoder.set_rate(48_000);
+    encoder.set_rate(OPUS_RATE as i32);
     encoder.set_ch_layout(ffmpeg::ChannelLayout::STEREO);
     encoder.set_format(ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed));
     encoder.set_bit_rate(OPUS_BITRATE);
-    encoder.set_time_base(ffmpeg::Rational(1, 48_000));
+    encoder.set_time_base(ffmpeg::Rational(1, OPUS_RATE as i32));
     let mut encoder = encoder.open().context("opening libopus encoder")?;
-
-    let mut resampler = ffmpeg::software::resampling::Context::get2(
-        ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed),
-        ffmpeg::ChannelLayout::STEREO,
-        KEYSOUND_RATE,
-        ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed),
-        ffmpeg::ChannelLayout::STEREO,
-        48_000,
-    )
-    .context("creating 44.1k->48k resampler")?;
 
     let mut octx = ffmpeg::format::output(output_path)
         .with_context(|| format!("creating output {}", output_path.display()))?;
     let mut out_stream = octx.add_stream(codec).context("adding output stream")?;
     out_stream.copy_parameters_from_context(encoder.as_ref());
-    out_stream.set_time_base(ffmpeg::Rational(1, 48_000));
+    out_stream.set_time_base(ffmpeg::Rational(1, OPUS_RATE as i32));
     octx.write_header().context("writing Ogg header")?;
 
-    // resample the whole 44.1k timeline to 48k: run() emits the bulk (its auto-sized output
-    // can't hold the upsampled surplus), then flush() drains the buffered tail + filter delay
-    // so the song's end is not lost.
-    let frames_in = timeline_44k.len() / ENCODE_CHANNELS;
-    let mut pcm_48k: Vec<f32> = Vec::new();
-    if frames_in > 0 {
-        let in_frame = make_audio_frame(timeline_44k, frames_in, KEYSOUND_RATE)?;
-        let mut resampled = ffmpeg::frame::Audio::empty();
-        resampler.run(&in_frame, &mut resampled).context("resampling to 48k")?;
-        pcm_48k.extend_from_slice(read_stereo_packed(&resampled));
-        loop {
-            let mut tail = ffmpeg::frame::Audio::empty();
-            tail.set_format(ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed));
-            tail.set_rate(48_000);
-            tail.set_ch_layout(ffmpeg::ChannelLayout::STEREO);
-            tail.set_samples(FLUSH_FRAMES);
-            unsafe {
-                av_frame_get_buffer(tail.as_mut_ptr(), 0);
-            }
-            resampler.flush(&mut tail).context("flushing resampler")?;
-            if tail.samples() == 0 {
-                break;
-            }
-            pcm_48k.extend_from_slice(read_stereo_packed(&tail));
-        }
-    }
+    let pcm_48k = resample_to_opus_rate(timeline, rate_in_hz)?;
 
     // encode 20 ms frames; pad the final partial frame with silence
     let mut pts: i64 = 0;
     for chunk in pcm_48k.chunks(OPUS_FRAME * ENCODE_CHANNELS) {
         let mut frame_data = chunk.to_vec();
         frame_data.resize(OPUS_FRAME * ENCODE_CHANNELS, 0.0);
-        let mut chunk_frame = make_audio_frame(&frame_data, OPUS_FRAME, 48_000)?;
+        let mut chunk_frame = make_audio_frame(&frame_data, OPUS_FRAME, OPUS_RATE)?;
         chunk_frame.set_pts(Some(pts));
         encoder.send_frame(&chunk_frame).context("sending frame to encoder")?;
         receive_and_mux(&mut encoder, &mut octx);
@@ -301,6 +273,53 @@ pub fn encode_opus(timeline_44k: &[f32], output_path: &Path) -> Result<()> {
     receive_and_mux(&mut encoder, &mut octx);
     octx.write_trailer().context("writing Ogg trailer")?;
     Ok(())
+}
+
+/* Bring an interleaved-stereo f32 timeline to libopus's 48 kHz. A timeline already at 48 kHz is
+borrowed unchanged — GITADORA is natively 48 kHz, and passing it through swresample would only add a
+resampler's filter delay and rounding for no benefit. Otherwise run() emits the bulk (its auto-sized
+output cannot hold the upsampled surplus) and flush() drains the buffered tail plus the filter delay,
+so the song's end is not lost. */
+fn resample_to_opus_rate(timeline: &[f32], rate_in_hz: u32) -> Result<Cow<'_, [f32]>> {
+    if rate_in_hz == OPUS_RATE {
+        return Ok(Cow::Borrowed(timeline));
+    }
+    let frames_in = timeline.len() / ENCODE_CHANNELS;
+    if frames_in == 0 {
+        return Ok(Cow::Borrowed(timeline));
+    }
+
+    let mut resampler = ffmpeg::software::resampling::Context::get2(
+        ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed),
+        ffmpeg::ChannelLayout::STEREO,
+        rate_in_hz,
+        ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed),
+        ffmpeg::ChannelLayout::STEREO,
+        OPUS_RATE,
+    )
+    .with_context(|| format!("creating {rate_in_hz}->{OPUS_RATE} resampler"))?;
+
+    let mut pcm_48k: Vec<f32> = Vec::new();
+    let in_frame = make_audio_frame(timeline, frames_in, rate_in_hz)?;
+    let mut resampled = ffmpeg::frame::Audio::empty();
+    resampler.run(&in_frame, &mut resampled).context("resampling to 48k")?;
+    pcm_48k.extend_from_slice(read_stereo_packed(&resampled));
+    loop {
+        let mut tail = ffmpeg::frame::Audio::empty();
+        tail.set_format(ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed));
+        tail.set_rate(OPUS_RATE);
+        tail.set_ch_layout(ffmpeg::ChannelLayout::STEREO);
+        tail.set_samples(FLUSH_FRAMES);
+        unsafe {
+            av_frame_get_buffer(tail.as_mut_ptr(), 0);
+        }
+        resampler.flush(&mut tail).context("flushing resampler")?;
+        if tail.samples() == 0 {
+            break;
+        }
+        pcm_48k.extend_from_slice(read_stereo_packed(&tail));
+    }
+    Ok(Cow::Owned(pcm_48k))
 }
 
 // allocate a packed-stereo f32 AVFrame of `samples` samples at `rate` and copy `data` in

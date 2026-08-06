@@ -1,4 +1,5 @@
-//! Chart (.1) parsing and difficulty selection.
+//! IIDX chart (`.1`) parsing and difficulty selection. GITADORA's charts are a different format
+//! entirely — see [`crate::gitadora::sq3`].
 //!
 //! The .1 header is 14 slots of (u32 offset, u32 length); a non-empty slot is one
 //! difficulty's event stream. SP difficulties occupy slots 0..4, DP slots 6..10 (see
